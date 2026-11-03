@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nano-vllm-from-scratch"
+version = "0.1.0"
+description = "A minimal LLM inference library built from scratch."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "safetensors>=0.8.0",
+    "torch==2.7.1",
+    "transformers>=5.22.1",
+]
+
+[project.optional-dependencies]
+flash = ["flash-attn==2.8.3.post2"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["model", "model.*"]
+namespaces = false
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.uv]
+# This binary environment targets the current Python 3.12 WSL machine.
+environments = ["python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'"]
+# Fail rather than starting a memory-intensive FlashAttention source build.
+no-build-package = ["flash-attn"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
+# Official wheel matching this WSL environment: Python 3.12, CUDA 12, PyTorch 2.7.
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post2/flash_attn-2.8.3.post2+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
