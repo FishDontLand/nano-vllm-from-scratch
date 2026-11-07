@@ -1,6 +1,7 @@
 import torch
 import model.layers as layers
 import torch.nn as nn
+from model.cache import KVCache
 
 class Qwen3Model(nn.Module):
   def __init__(
@@ -34,10 +35,14 @@ class Qwen3Model(nn.Module):
     self.norm = layers.RMSNorm(hidden_size, rms_norm_eps)
 
 
-  def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+  def forward(self, input_ids: torch.Tensor, positions: torch.Tensor, caches: list[KVCache] | None=None) -> torch.Tensor:
     embedding = self.embed_tokens(input_ids)
-    for layer in self.layers:
-      embedding = layer(embedding, positions)
+    
+    if caches is None:
+      caches = [None for _ in self.layers]
+    
+    for layer, cache in zip(self.layers, caches):
+      embedding = layer(embedding, positions, cache=cache)
 
     return self.norm(embedding)
 
@@ -58,6 +63,9 @@ class Qwen3ForCausalLM(nn.Module):
       tie_word_embeddings: bool
   ):
     super().__init__()
+    self.num_hidden_layers = num_hidden_layers
+    self.num_kv_heads = num_kv_heads
+    self.head_dim = head_dim
     self.model = Qwen3Model(
       vocab_size,
       num_hidden_layers,
@@ -75,8 +83,8 @@ class Qwen3ForCausalLM(nn.Module):
     if tie_word_embeddings:
       self.lm_head.weight = self.model.embed_tokens.weight
     
-  def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-    return self.model(input_ids, positions)
+  def forward(self, input_ids: torch.Tensor, positions: torch.Tensor, caches: list[KVCache] | None=None) -> torch.Tensor:
+    return self.model(input_ids, positions, caches=caches)
 
   def compute_logits(self, hidden_states: torch.Tensor):
     return self.lm_head(hidden_states)

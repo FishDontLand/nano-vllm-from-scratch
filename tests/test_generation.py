@@ -66,47 +66,56 @@ def tiny_qwen():
     return model
 
 
+@pytest.mark.parametrize("use_cache", [False, True], ids=["uncached", "cached"])
 @pytest.mark.parametrize(
     "max_new_tokens,eos_token_id,max_seq_len,expected",
     [
-        (5, 6, 8, [5, 7, 0, 5, 7]),  # Full token budget; no EOS.
-        (5, 0, 8, [5, 7, 0]),        # EOS on the third step.
-        (5, 5, 8, [5]),              # EOS immediately.
-        (2, 0, 8, [5, 7]),           # Budget reached before EOS.
-        (5, 6, 7, [5, 7, 0, 5, 7]),  # Exactly fills length limit.
-        (0, 6, 8, []),               # Zero new tokens.
+        # Both rows use the full token budget.
+        (5, 6, 8, [[5, 7, 0, 5, 7], [0, 5, 7, 0, 5]]),
+        # Row 2 reaches EOS immediately; row 1 continues until step 3.
+        (5, 0, 8, [[5, 7, 0], [0]]),
+        # Row 1 reaches EOS immediately; row 2 continues until step 2.
+        (5, 5, 8, [[5], [0, 5]]),
+        # Row 1 reaches its budget; row 2 reaches EOS.
+        (2, 0, 8, [[5, 7], [0]]),
+        # Two prompt tokens plus five output tokens exactly fill capacity.
+        (5, 6, 7, [[5, 7, 0, 5, 7], [0, 5, 7, 0, 5]]),
+        # Zero budget returns an empty result for each input row.
+        (0, 6, 8, [[], []]),
     ],
 )
 def test_generate_greedy_with_qwen(
-    tiny_qwen, max_new_tokens, eos_token_id, max_seq_len, expected
+    tiny_qwen, use_cache, max_new_tokens, eos_token_id, max_seq_len, expected
 ):
     input_ids = torch.tensor(
-        [[1, 3]], device="cuda", dtype=torch.long
+        [[1, 3], [2, 4]], device="cuda", dtype=torch.long
     )
     original_input = input_ids.clone()
 
-    # generate_greedy should manage inference_mode internally.
     actual = generate_greedy(
         model=tiny_qwen,
         input_ids=input_ids,
         max_new_tokens=max_new_tokens,
         eos_token_id=eos_token_id,
         max_seq_len=max_seq_len,
+        use_cache=use_cache,
     )
 
     assert isinstance(actual, list)
-    assert all(isinstance(token, int) for token in actual)
+    assert all(isinstance(row, list) for row in actual)
+    assert all(isinstance(token, int) for row in actual for token in row)
     assert actual == expected
 
     torch.testing.assert_close(input_ids, original_input)
 
 
-def test_generate_greedy_rejects_length_overflow(tiny_qwen):
+@pytest.mark.parametrize("use_cache", [False, True], ids=["uncached", "cached"])
+def test_generate_greedy_rejects_length_overflow(tiny_qwen, use_cache):
     input_ids = torch.tensor(
-        [[1, 3]], device="cuda", dtype=torch.long
+        [[1, 3], [2, 4]], device="cuda", dtype=torch.long
     )
 
-    # Two prompt tokens + seven requested tokens exceed capacity eight.
+    # Each row has two prompt tokens and requests seven more: 9 > 8.
     with pytest.raises(ValueError):
         generate_greedy(
             model=tiny_qwen,
@@ -114,4 +123,23 @@ def test_generate_greedy_rejects_length_overflow(tiny_qwen):
             max_new_tokens=7,
             eos_token_id=6,
             max_seq_len=8,
+            use_cache=use_cache,
         )
+
+
+@pytest.mark.parametrize("use_cache", [False, True], ids=["uncached", "cached"])
+def test_generate_greedy_single_row_batch(tiny_qwen, use_cache):
+    input_ids = torch.tensor([[1, 3]], device="cuda", dtype=torch.long)
+
+    actual = generate_greedy(
+        model=tiny_qwen,
+        input_ids=input_ids,
+        max_new_tokens=5,
+        eos_token_id=6,
+        max_seq_len=8,
+        use_cache=use_cache,
+    )
+
+    assert actual == [[5, 7, 0, 5, 7]]
+
+

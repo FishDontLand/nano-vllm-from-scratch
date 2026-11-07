@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from torch.distributed import get_rank, get_world_size
 from flash_attn import flash_attn_func
+from model.cache import KVCache
 
 class LinearBase(nn.Module):
   def __init__(
@@ -225,7 +226,7 @@ class Qwen3Attention(nn.Module):
     self.k_norm = RMSNorm(head_dim, rms_norm_eps)
     self.rotary_emb = RotaryEmbedding(head_dim, rope_theta, max_seq_len)
 
-  def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+  def forward(self, x: torch.Tensor, positions: torch.Tensor, cache: KVCache | None=None) -> torch.Tensor:
     q = self.q_proj(x)
     q = q.view(*q.size()[:-1], self.num_heads, self.head_dim)
     k = self.k_proj(x)
@@ -238,6 +239,12 @@ class Qwen3Attention(nn.Module):
 
     q = self.rotary_emb(q, positions)
     k = self.rotary_emb(k, positions)
+
+    if cache:
+      if cache.length == 0:
+        cache.to(k.dtype)
+      k, v = cache.append(k, v)
+      
     attn = flash_attn_func(q, k, v, dropout_p=0.0, causal=True)
     attn = attn.view(*x.size()[:-1], -1)
 
@@ -277,8 +284,8 @@ class Qwen3DecoderLayer(nn.Module):
     self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
 
 
-  def forward(self, x:torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-    update = self.self_attn(self.input_layernorm(x), positions)
+  def forward(self, x:torch.Tensor, positions: torch.Tensor, cache: KVCache | None=None) -> torch.Tensor:
+    update = self.self_attn(self.input_layernorm(x), positions, cache=cache)
     x_update = x + update
     return x_update + self.mlp(self.post_attention_layernorm(x_update))
 
