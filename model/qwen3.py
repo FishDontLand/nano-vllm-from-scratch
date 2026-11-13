@@ -35,14 +35,14 @@ class Qwen3Model(nn.Module):
     self.norm = layers.RMSNorm(hidden_size, rms_norm_eps)
 
 
-  def forward(self, input_ids: torch.Tensor, positions: torch.Tensor, caches: list[KVCache] | None=None) -> torch.Tensor:
+  def forward(self, input_ids: torch.Tensor, positions: torch.Tensor, caches: list[KVCache] | None=None, cum_len: torch.Tensor | None=None, max_seq_len: int | None=None) -> torch.Tensor:
     embedding = self.embed_tokens(input_ids)
     
     if caches is None:
       caches = [None for _ in self.layers]
     
     for layer, cache in zip(self.layers, caches):
-      embedding = layer(embedding, positions, cache=cache)
+      embedding = layer(embedding, positions, cache=cache, cum_len=cum_len, max_seq_len=max_seq_len)
 
     return self.norm(embedding)
 
@@ -83,11 +83,13 @@ class Qwen3ForCausalLM(nn.Module):
     if tie_word_embeddings:
       self.lm_head.weight = self.model.embed_tokens.weight
     
-  def forward(self, input_ids: torch.Tensor, positions: torch.Tensor, caches: list[KVCache] | None=None) -> torch.Tensor:
-    return self.model(input_ids, positions, caches=caches)
+  def forward(self, input_ids: torch.Tensor, positions: torch.Tensor, caches: list[KVCache] | None=None, cum_seq_lens: torch.Tensor | None=None, max_prompt_len: int | None=None) -> torch.Tensor:
+    return self.model(input_ids, positions, caches=caches, cum_len=cum_seq_lens, max_seq_len=max_prompt_len)
 
   def compute_logits(self, hidden_states: torch.Tensor):
     return self.lm_head(hidden_states)
+
+    
   
     
     

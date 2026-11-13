@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torch.distributed import get_rank, get_world_size
-from flash_attn import flash_attn_func
+from flash_attn import flash_attn_func, flash_attn_varlen_func 
 from model.cache import KVCache
 
 class LinearBase(nn.Module):
@@ -175,8 +175,8 @@ class RotaryEmbedding(nn.Module):
   def forward(self, x : torch.Tensor, positions: torch.Tensor | None) -> torch.Tensor:
     """
     Args:
-      x: Floating tensor [batch, sequence, heads, head_dim]
-      positions: Integer tensor [batch, sequence]
+      x: Floating tensor [batch, sequence, heads, head_dim] or [sequence, heads, head_dim]
+      positions: Integer tensor [batch, sequence] or [sequence]
 
     Returns:
       Embedding after RoPE
@@ -184,19 +184,22 @@ class RotaryEmbedding(nn.Module):
     x_size = x.size()
     position_size = positions.size()
 
-    if position_size[0] != x_size[0]:
+    seq_dim = len(positions.size()) - 1
+
+    if position_size[:seq_dim] != x_size[:seq_dim]:
       raise ValueError("Batch size don't match!")
 
-    if position_size[1] != x_size[1]:
+    if position_size[seq_dim] != x_size[seq_dim]:
       raise ValueError("Sequence length don't match!")
 
     if x_size[-1] != self.head_dim:
       raise ValueError(f"require the head_dim of the input tensor to be {self.head_dim}")
+    
     x_reshape = x.view(*x_size[:-1], 2, x_size[-1] // 2).transpose(-2, -1)
     x_reshape = x_reshape.view(*x_reshape.size()[:-1], 2, 1)
 
     rotation = self.rotation[positions, :, :, :]
-    rotation = rotation.view(x_size[0], x_size[1], 1, self.head_dim // 2, 2, 2)
+    rotation = rotation.view(*position_size, 1, self.head_dim // 2, 2, 2)
     result = torch.matmul(rotation, x_reshape)
     result = result.view(result.size()[:-1]).transpose(-2, -1).reshape(*result.size()[:-2], -1)
 
@@ -225,8 +228,11 @@ class Qwen3Attention(nn.Module):
     self.q_norm = RMSNorm(head_dim, rms_norm_eps)
     self.k_norm = RMSNorm(head_dim, rms_norm_eps)
     self.rotary_emb = RotaryEmbedding(head_dim, rope_theta, max_seq_len)
+  
+  def forward_packed(self, x: torch.Tensor, positions: torch.Tensor, cum_len: torch.Tensor, max_seq_len: int, cache: KVCache) -> torch.Tensor:
+    q = self.q_proj(x)
 
-  def forward(self, x: torch.Tensor, positions: torch.Tensor, cache: KVCache | None=None) -> torch.Tensor:
+  def forward(self, x: torch.Tensor, positions: torch.Tensor, cache: KVCache | None=None, cum_len: torch.Tensor | None=None, max_seq_len: int | None=None) -> torch.Tensor:
     q = self.q_proj(x)
     q = q.view(*q.size()[:-1], self.num_heads, self.head_dim)
     k = self.k_proj(x)
@@ -244,12 +250,22 @@ class Qwen3Attention(nn.Module):
       if cache.length == 0:
         cache.to(k.dtype)
       k, v = cache.append(k, v)
+
+    if not cum_len is None:
+      if not max_seq_len:
+        max_seq_len = (cum_len[:,1:] - cum_len[:,-1]).max().item()
       
-    attn = flash_attn_func(q, k, v, dropout_p=0.0, causal=True)
+      attn = flash_attn_varlen_func(q, k, v, 
+                                    cu_seqlens_q=cum_len, cu_seqlens_k=cum_len, 
+                                    max_seqlen_q=max_seq_len,
+                                    max_seqlen_k=max_seq_len,
+                                    dropout_p=0.0, causal=True)
+      
+    else:
+      attn = flash_attn_func(q, k, v, dropout_p=0.0, causal=True)
     attn = attn.view(*x.size()[:-1], -1)
 
-    return self.o_proj(attn)
-
+    return self.o_proj(attn)  
     
 class Qwen3DecoderLayer(nn.Module):
   def __init__(
@@ -284,8 +300,8 @@ class Qwen3DecoderLayer(nn.Module):
     self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
 
 
-  def forward(self, x:torch.Tensor, positions: torch.Tensor, cache: KVCache | None=None) -> torch.Tensor:
-    update = self.self_attn(self.input_layernorm(x), positions, cache=cache)
+  def forward(self, x:torch.Tensor, positions: torch.Tensor, cache: KVCache | None=None, cum_len: torch.Tensor | None=None, max_seq_len: int | None=None) -> torch.Tensor:
+    update = self.self_attn(self.input_layernorm(x), positions, cache=cache, cum_len=cum_len, max_seq_len=max_seq_len)
     x_update = x + update
     return x_update + self.mlp(self.post_attention_layernorm(x_update))
 

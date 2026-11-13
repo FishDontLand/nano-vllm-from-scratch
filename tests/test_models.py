@@ -252,3 +252,48 @@ class TestQwen3ForCasualLM:
 
       # These particular values are exactly representable in FP16.
       torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+  @pytest.mark.parametrize("model_case", [True], indirect=True, ids=["tied"])
+  @torch.no_grad()
+  def test_forward_packed_matches_individual_prompts(self, model_case):
+      model, _ = model_case
+      prompts = [[0, 3, 6], [1, 5], [2]]
+
+      # Expected: run each prompt independently, then concatenate its outputs.
+      expected_parts = []
+      for prompt in prompts:
+          input_ids = torch.tensor(
+              [prompt], device="cuda", dtype=torch.long
+          )
+          positions = torch.arange(
+              len(prompt), device="cuda", dtype=torch.long
+          ).unsqueeze(0)
+          expected_parts.append(model(input_ids, positions).squeeze(0))
+      expected = torch.cat(expected_parts, dim=0)
+
+      # Actual: process the same three prompts in one packed forward call.
+      packed_ids = torch.tensor(
+          [0, 3, 6, 1, 5, 2], device="cuda", dtype=torch.long
+      )
+      packed_positions = torch.tensor(
+          [0, 1, 2, 0, 1, 0], device="cuda", dtype=torch.long
+      )
+      cum_seq_lens = torch.tensor(
+          [0, 3, 5, 6], device="cuda", dtype=torch.int32
+      )
+
+      actual = model(
+          packed_ids,
+          packed_positions,
+          cum_seq_lens=cum_seq_lens,
+          max_prompt_len=3,
+      )
+
+      assert actual.shape == (6, 4)
+      assert actual.dtype == torch.float16
+      assert actual.device == packed_ids.device
+
+      torch.testing.assert_close(
+          actual.float(), expected.float(), rtol=5e-3, atol=2e-3
+      )
+
