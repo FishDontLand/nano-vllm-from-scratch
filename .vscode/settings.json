@@ -1,0 +1,17 @@
+{
+  "python.defaultInterpreterPath": "/workspace/nano-vllm-from-scratch/.venv/bin/python",
+  "python.envFile": "/workspace/nano-vllm.env",
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestArgs": [
+    "tests"
+  ],
+  "terminal.integrated.env.linux": {
+    "UV_PYTHON_INSTALL_DIR": "/workspace/.uv/python",
+    "UV_CACHE_DIR": "/workspace/.cache/uv",
+    "HF_HOME": "/workspace/.cache/huggingface",
+    "CUDA_CACHE_PATH": "/workspace/.cache/cuda",
+    "TRITON_CACHE_DIR": "/workspace/.cache/triton",
+    "PATH": "/workspace/.local/bin:${env:PATH}"
+  }
+}

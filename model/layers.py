@@ -182,10 +182,21 @@ class RotaryEmbedding(nn.Module):
       Embedding after RoPE
     """
     x_size = x.size()
+    seq_dim = len(x_size) - 3
+
+    if positions is None:
+      positions = torch.arange(x_size[seq_dim], dtype=torch.long, device=x.device)
+      if seq_dim > 0:
+        batch_size = x_size[:seq_dim]
+        positions = positions.repeat(
+          x.numel() // (x_size[-3] * x_size[-2] * x_size[-1])
+        )
+        positions = positions.view(
+          *batch_size, x_size[seq_dim]
+        )
+      
     position_size = positions.size()
-
-    seq_dim = len(positions.size()) - 1
-
+    
     if position_size[:seq_dim] != x_size[:seq_dim]:
       raise ValueError("Batch size don't match!")
 
@@ -228,11 +239,9 @@ class Qwen3Attention(nn.Module):
     self.q_norm = RMSNorm(head_dim, rms_norm_eps)
     self.k_norm = RMSNorm(head_dim, rms_norm_eps)
     self.rotary_emb = RotaryEmbedding(head_dim, rope_theta, max_seq_len)
-  
-  def forward_packed(self, x: torch.Tensor, positions: torch.Tensor, cum_len: torch.Tensor, max_seq_len: int, cache: KVCache) -> torch.Tensor:
-    q = self.q_proj(x)
 
-  def forward(self, x: torch.Tensor, positions: torch.Tensor, cache: KVCache | None=None, cum_len: torch.Tensor | None=None, max_seq_len: int | None=None) -> torch.Tensor:
+
+  def forward(self, x: torch.Tensor, positions: torch.Tensor | None=None, cache: KVCache | None=None, cum_len: torch.Tensor | None=None, max_seq_len: int | None=None) -> torch.Tensor:
     q = self.q_proj(x)
     q = q.view(*q.size()[:-1], self.num_heads, self.head_dim)
     k = self.k_proj(x)
@@ -249,14 +258,14 @@ class Qwen3Attention(nn.Module):
     if cache:
       if cache.length == 0:
         cache.to(k.dtype)
-      k, v = cache.append(k, v)
+      k, v, kv_cum_len = cache.append(k, v, cum_len[:, 1:] - cum_len[:, :-1])
 
     if not cum_len is None:
       if not max_seq_len:
-        max_seq_len = (cum_len[:,1:] - cum_len[:,-1]).max().item()
+        max_seq_len = (cum_len[:,1:] - cum_len[:,:-1]).max().item()
       
       attn = flash_attn_varlen_func(q, k, v, 
-                                    cu_seqlens_q=cum_len, cu_seqlens_k=cum_len, 
+                                    cu_seqlens_q=cum_len, cu_seqlens_k=kv_cum_len, 
                                     max_seqlen_q=max_seq_len,
                                     max_seqlen_k=max_seq_len,
                                     dropout_p=0.0, causal=True)
@@ -300,12 +309,10 @@ class Qwen3DecoderLayer(nn.Module):
     self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
 
 
-  def forward(self, x:torch.Tensor, positions: torch.Tensor, cache: KVCache | None=None, cum_len: torch.Tensor | None=None, max_seq_len: int | None=None) -> torch.Tensor:
+  def forward(self, x:torch.Tensor, positions: torch.Tensor | None=None, cache: KVCache | None=None, cum_len: torch.Tensor | None=None, max_seq_len: int | None=None) -> torch.Tensor:
     update = self.self_attn(self.input_layernorm(x), positions, cache=cache, cum_len=cum_len, max_seq_len=max_seq_len)
     x_update = x + update
     return x_update + self.mlp(self.post_attention_layernorm(x_update))
-
-
 
 
 

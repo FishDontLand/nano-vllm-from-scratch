@@ -17,7 +17,7 @@ def generate_sample(input: str, max_new_tokens=32, use_cache=False, decode=True,
   input_ids = tokenizer(input)['input_ids']
   input_ids = torch.tensor([input_ids], dtype=torch.long, device='cuda:0')
 
-  answer = generation.generate_greedy(
+  answer, _ = generation.generate_greedy(
     model, 
     input_ids,
     max_new_tokens=max_new_tokens,

@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run benchmark.py",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/benchmark.py",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "cwd": "${workspaceFolder}/examples",
+      "console": "integratedTerminal",
+      "envFile": "${config:python.envFile}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}${pathSeparator}${env:PYTHONPATH}"
+      },
+      "justMyCode": true
+    }
+  ]
+}

@@ -2,7 +2,8 @@ import pytest
 import torch
 
 from model.qwen3 import Qwen3ForCausalLM
-from generation import generate_greedy
+from generation import generate_greedy, generate_greedy_varlen
+from examples import benchmark
 
 
 @pytest.fixture(scope="module")
@@ -92,7 +93,7 @@ def test_generate_greedy_with_qwen(
     )
     original_input = input_ids.clone()
 
-    actual = generate_greedy(
+    actual, _ = generate_greedy(
         model=tiny_qwen,
         input_ids=input_ids,
         max_new_tokens=max_new_tokens,
@@ -131,7 +132,7 @@ def test_generate_greedy_rejects_length_overflow(tiny_qwen, use_cache):
 def test_generate_greedy_single_row_batch(tiny_qwen, use_cache):
     input_ids = torch.tensor([[1, 3]], device="cuda", dtype=torch.long)
 
-    actual = generate_greedy(
+    actual, _ = generate_greedy(
         model=tiny_qwen,
         input_ids=input_ids,
         max_new_tokens=5,
@@ -142,4 +143,112 @@ def test_generate_greedy_single_row_batch(tiny_qwen, use_cache):
 
     assert actual == [[5, 7, 0, 5, 7]]
 
+@pytest.mark.parametrize(
+    "prompts,max_new_tokens,eos_token_id,max_seq_len",
+    [
+        pytest.param(
+            [[2, 4, 6], [1, 3], [2]], 5, 6, 8,
+            id="mixed-lengths-multiple-decode-steps",
+        ),
+        pytest.param(
+            [[1, 3], [2], [2, 4]], 5, 0, 8,
+            id="mixed-lengths-independent-eos-zero",
+        ),
+        pytest.param(
+            [[1, 3], [2], [2, 4]], 5, 5, 8,
+            id="mixed-lengths-independent-eos-five",
+        ),
+        pytest.param(
+            [[2, 4, 6], [1, 3], [2]], 1, 6, 8,
+            id="first-token-only",
+        ),
+        pytest.param(
+            [[1, 3]], 5, 6, 8,
+            id="single-request",
+        ),
+        pytest.param(
+            [[1, 3], [2, 4]], 5, 6, 8,
+            id="equal-lengths",
+        ),
+        pytest.param(
+            [[2, 4, 6], [1, 3], [2]], 0, 6, 8,
+            id="zero-token-budget",
+        ),
+        pytest.param(
+            [[0] * 8, [1, 3], [0] * 9, [2, 4]], 5, 0, 8,
+            id="full-requests-preserve-output-order",
+        ),
+        pytest.param(
+            [[0] * 8, [0] * 9], 3, 6, 8,
+            id="all-requests-already-at-capacity",
+        ),
+        pytest.param(
+            [[2], [2, 4, 6], [1, 3]], 5, 6, 8,
+            id="reordered-mixed-lengths",
+        ),
+    ],
+)
+def test_generate_greedy_varlen(
+    tiny_qwen, prompts, max_new_tokens, eos_token_id, max_seq_len
+):
+    # Use the same model and existing uncached generation as the reference.
+    # Capacity-exhausted requests have no generated tokens under this API.
+    original_prompts = [prompt.copy() for prompt in prompts]
+    expected = []
+    for prompt in prompts:
+        if len(prompt) >= max_seq_len or max_new_tokens == 0:
+            expected.append([])
+            continue
+        input_ids = torch.tensor(
+            [prompt], device=tiny_qwen.lm_head.weight.device, dtype=torch.long
+        )
+        reference, _ = generate_greedy(
+            model=tiny_qwen,
+            input_ids=input_ids,
+            max_new_tokens=max_new_tokens,
+            eos_token_id=eos_token_id,
+            max_seq_len=max_seq_len,
+            use_cache=False,
+        )
+        expected.append(reference[0])
 
+    actual = generate_greedy_varlen(
+        model=tiny_qwen,
+        prompts=prompts,
+        max_new_tokens=max_new_tokens,
+        eos_token_id=eos_token_id,
+        max_seq_len=max_seq_len,
+    )
+
+    assert isinstance(actual, list)
+    assert len(actual) == len(prompts)
+    assert all(isinstance(row, list) for row in actual)
+    assert all(isinstance(token, int) for row in actual for token in row)
+    assert actual == expected
+    assert prompts == original_prompts
+
+
+def test_generate_greedy_varlen_rejects_length_overflow(tiny_qwen):
+    # The first request fits exactly; the second exceeds capacity.
+    prompts = [[1, 3], [2, 4, 6]]
+    original_prompts = [prompt.copy() for prompt in prompts]
+    forward_calls = []
+
+    def record_forward(module, args):
+        forward_calls.append(True)
+
+    handle = tiny_qwen.register_forward_pre_hook(record_forward)
+    try:
+        with pytest.raises(ValueError):
+            generate_greedy_varlen(
+                model=tiny_qwen,
+                prompts=prompts,
+                max_new_tokens=6,
+                eos_token_id=6,
+                max_seq_len=8,
+            )
+    finally:
+        handle.remove()
+
+    assert not forward_calls, "Capacity must be validated before generation starts."
+    assert prompts == original_prompts
