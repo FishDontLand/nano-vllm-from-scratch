@@ -91,10 +91,12 @@ def generate_greedy_varlen(
     device=model.lm_head.weight.device
   )
 
-  if len(filtered_prompts) == 0:
-    raise ValueError("all prompts exceed the length capacity")
+  generations = [[] for _ in range(len(prompts))]
 
-  total_len += sum([min(max_new_tokens + len(p), max_seq_len) for p in filtered_prompts])
+  if len(filtered_prompts) == 0:
+    return generations
+
+  total_len = sum([min(max_new_tokens + len(p), max_seq_len) for p in filtered_prompts])
 
   kv_caches = []
   for _ in range(model.num_hidden_layers):
@@ -109,14 +111,11 @@ def generate_greedy_varlen(
     cache.to(model.lm_head.weight.device)
     kv_caches.append(cache)
 
-  packed_prompts, positions, cum_len, _ = pack_prompts(prompts, model.lm_head.weight.device, max_seq_len)
+  packed_prompts, positions, cum_len, _ = pack_prompts(filtered_prompts, model.lm_head.weight.device, max_seq_len)
   init_last_positions = cum_len[1:] - 1
-  n_prompt = len(filtered_prompts)
   prompt_not_end = torch.ones_like(
     init_last_positions, device=init_last_positions.device, dtype=torch.bool
   )
-
-  generations = [[] for _ in range(len(prompts))]
   
   with torch.inference_mode():
     for i in range(max_new_tokens):
@@ -124,7 +123,12 @@ def generate_greedy_varlen(
           embeddings = model(packed_prompts, positions=positions, caches=kv_caches, cum_seq_lens=cum_len, max_prompt_len=max_seq_len)
           last_embedding = embeddings[init_last_positions, :]
         else:
-          q_cum_len = torch.arange(packed_prompt_len.size()[0] + 1, dtype=torch.long, device=model.lm_head.weight.device)
+          new_q_len = torch.where(prompt_not_end, 1, 0)
+          q_cum_len = new_q_len.cumsum(dim=-1, dtype=torch.int32)
+          q_cum_len = torch.concat([
+            torch.zeros(*q_cum_len.size()[:-1], 1, dtype=q_cum_len.dtype, device=q_cum_len.device),
+            q_cum_len
+          ], dim=-1)
           embeddings = model(packed_prompts, positions=positions, caches=kv_caches, cum_seq_lens=q_cum_len, max_prompt_len=max_seq_len)
           last_embedding = embeddings
 
@@ -132,22 +136,25 @@ def generate_greedy_varlen(
         packed_prompts = torch.argmax(logits, dim=-1)
 
         update_idx_lst = is_kept_idx[prompt_not_end].tolist()
-        packed_prompts_lst = packed_prompts.list()
+        packed_prompts_lst = packed_prompts.tolist()
         for idx, token_id in zip(update_idx_lst, packed_prompts_lst):
           generations[idx].append(token_id)
 
         generated_prompt_len = torch.where(
           prompt_not_end, 1, 0
         )
+        
         cum_len[1:] += generated_prompt_len.cumsum(dim=-1)
         packed_prompt_len = (cum_len[1:] - cum_len[:-1])[prompt_not_end]
 
-        prompt_not_end[prompt_not_end] = (packed_prompts != eos_token_id) & (cum_len[1:] - cum_len[:1] < max_seq_len)
+        condition = (packed_prompts != eos_token_id) & (packed_prompt_len < max_seq_len)
+        prompt_not_end[prompt_not_end.clone()] = condition
+        if not prompt_not_end.any().item():
+          break
 
-        positions = init_last_positions + (i + 1)
-        positions = positions[prompt_not_end]
+        positions = packed_prompt_len[condition]
 
-        packed_prompts = packed_prompts[(packed_prompts != eos_token_id) & (packed_prompt_len < max_seq_len)]
+        packed_prompts = packed_prompts[condition]
 
 
   return generations

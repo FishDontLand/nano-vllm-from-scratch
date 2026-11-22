@@ -256,9 +256,9 @@ class Qwen3Attention(nn.Module):
     k = self.rotary_emb(k, positions)
 
     if cache:
-      if cache.length == 0:
+      if cache.length is None:
         cache.to(k.dtype)
-      k, v, kv_cum_len = cache.append(k, v, cum_len[:, 1:] - cum_len[:, :-1])
+      k, v, kv_cum_len = cache.append(k, v, cum_len[1:] - cum_len[:-1])
 
     if not cum_len is None:
       if not max_seq_len:

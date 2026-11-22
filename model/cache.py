@@ -25,21 +25,23 @@ class KVCache(nn.Module):
             k: torch.Tensor,
             v: torch.Tensor,
             length: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         assert k.size() == v.size(), "k, v tensors should have the same shape"
-
+        
         if length is None:
-            length = torch.tensor([k.size()[1]], dtype=torch.long, device=k.device)
+            is_packed = False
+            length = torch.tensor([k.size()[1]], dtype=torch.int32, device=k.device)
             if self.length is None:
-                self.length = torch.tensor([0], dtype=torch.long, device=k.device)
+                self.length = torch.tensor([0], dtype=torch.int32, device=k.device)
 
-            old_length = self.length.sum()
+            old_length = self.length.sum().item()
         else:
+            is_packed = True
             if self.length is None:
-                self.length = torch.zeros_like(length, dtype=torch.long, device=k.device)
-            old_length = self.length.sum()
+                self.length = torch.zeros_like(length, dtype=torch.int32, device=k.device)
+            old_length = self.length.sum().item()
 
-        new_length = old_length + length.sum()
+        new_length = old_length + length.sum().item()
 
         self.k_cache[:, old_length:new_length, :, :] = k
         self.v_cache[:, old_length:new_length, :, :] = v
@@ -53,10 +55,11 @@ class KVCache(nn.Module):
         for i in range(len(cum_len)):
             if i == 0:
                 new_idx.append(idx[:cum_old_len[i]])
-                new_idx.append(idx[old_length:cum_len[i]])
+                new_idx.append(idx[old_length:(old_length + cum_len[i])])
             else:
                 new_idx.append(idx[cum_old_len[i - 1] : cum_old_len[i]])
                 new_idx.append(idx[(old_length + cum_len[i - 1]) : (old_length + cum_len[i])])
+
         new_idx = torch.concat(new_idx, dim=-1)
         
         self.k_cache[:, :new_length, :, :] = self.k_cache[:, new_idx, :, :]
@@ -64,8 +67,13 @@ class KVCache(nn.Module):
 
         self.length += length
 
-
-        return self.k_cache[:, :new_length, :, :], self.v_cache[:, : new_length, :, :], self.length.cumsum(dim=-1)
+        if is_packed:
+            kv_cum_len = self.length.cumsum(dim=-1, dtype=torch.int32)
+            kv_cum_len = torch.concat([torch.zeros(*kv_cum_len.size()[:-1], 1, device=kv_cum_len.device, dtype=kv_cum_len.dtype), 
+                                       kv_cum_len], dim=-1)
+            return self.k_cache[0, :new_length, :, :], self.v_cache[0, : new_length, :, :], kv_cum_len
+        else:
+            return self.k_cache[:, :new_length, :, :], self.v_cache[:, : new_length, :, :], None
 
     def reset(self)->None:
         self.length = None

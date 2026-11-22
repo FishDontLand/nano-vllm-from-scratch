@@ -14,6 +14,19 @@
         "PYTHONPATH": "${workspaceFolder}${pathSeparator}${env:PYTHONPATH}"
       },
       "justMyCode": true
+    },
+    {
+      "name": "Debug CUDA tests",
+      "type": "debugpy",
+      "request": "launch",
+      "purpose": [
+        "debug-test"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "CUDA_LAUNCH_BLOCKING": "1"
+      }
     }
   ]
 }

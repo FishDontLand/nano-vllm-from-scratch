@@ -228,27 +228,23 @@ def test_generate_greedy_varlen(
     assert prompts == original_prompts
 
 
-def test_generate_greedy_varlen_rejects_length_overflow(tiny_qwen):
-    # The first request fits exactly; the second exceeds capacity.
+def test_generate_greedy_varlen_stops_at_capacity(tiny_qwen):
+    # Request six new tokens. With capacity eight, these prompts have room
+    # for six and five tokens respectively; neither reference reaches EOS.
     prompts = [[1, 3], [2, 4, 6]]
     original_prompts = [prompt.copy() for prompt in prompts]
-    forward_calls = []
 
-    def record_forward(module, args):
-        forward_calls.append(True)
+    # Verified using individual uncached generation with each request's
+    # available token budget and the same tiny_qwen fixture.
+    expected = [[5, 7, 0, 5, 7, 0], [5, 7, 0, 5, 7]]
 
-    handle = tiny_qwen.register_forward_pre_hook(record_forward)
-    try:
-        with pytest.raises(ValueError):
-            generate_greedy_varlen(
-                model=tiny_qwen,
-                prompts=prompts,
-                max_new_tokens=6,
-                eos_token_id=6,
-                max_seq_len=8,
-            )
-    finally:
-        handle.remove()
+    actual = generate_greedy_varlen(
+        model=tiny_qwen,
+        prompts=prompts,
+        max_new_tokens=6,
+        eos_token_id=6,
+        max_seq_len=8,
+    )
 
-    assert not forward_calls, "Capacity must be validated before generation starts."
+    assert actual == expected
     assert prompts == original_prompts
